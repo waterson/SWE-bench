@@ -28,9 +28,9 @@ def filter_dataset_to_build(
         force_rebuild (bool): Whether to force rebuild all images.
     """
     # Get existing images
-    existing_images = list_images(client)
+    existing_images = set()  # list_images(client)
     data_to_build = []
-    
+
     if instance_ids is None:
         instance_ids = [instance[KEY_INSTANCE_ID] for instance in dataset]
 
@@ -79,7 +79,7 @@ def main(
 
     # Filter out instances that were not specified
     dataset = load_swebench_dataset(dataset_name, split)
-    dataset = filter_dataset_to_build(dataset, instance_ids, client, force_rebuild, namespace, tag)
+    #dataset = filter_dataset_to_build(dataset, instance_ids, client, force_rebuild, namespace, tag)
 
     # Build images for remaining instances
     successful, failed = build_instance_images(
