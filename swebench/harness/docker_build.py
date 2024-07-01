@@ -113,43 +113,7 @@ def build_image(
         with open(dockerfile_path, "w") as f:
             f.write(dockerfile)
 
-        # Build the image
-        logger.info(
-            f"Building docker image {image_name} in {build_dir} with platform {platform}"
-        )
-        response = client.api.build(
-            path=str(build_dir),
-            tag=image_name,
-            rm=True,
-            forcerm=True,
-            decode=True,
-            platform=platform,
-            nocache=nocache,
-        )
-
-        # Log the build process continuously
-        buildlog = ""
-        for chunk in response:
-            if "stream" in chunk:
-                # Remove ANSI escape sequences from the log
-                chunk_stream = ansi_escape.sub("", chunk["stream"])
-                logger.info(chunk_stream.strip())
-                buildlog += chunk_stream
-            elif "errorDetail" in chunk:
-                # Decode error message, raise BuildError
-                logger.error(
-                    f"Error: {ansi_escape.sub('', chunk['errorDetail']['message'])}"
-                )
-                raise docker.errors.BuildError(
-                    chunk["errorDetail"]["message"], buildlog
-                )
-        logger.info("Image built successfully!")
-    except docker.errors.BuildError as e:
-        logger.error(f"docker.errors.BuildError during {image_name}: {e}")
-        raise BuildImageError(image_name, str(e), logger) from e
-    except Exception as e:
-        logger.error(f"Error building image {image_name}: {e}")
-        raise BuildImageError(image_name, str(e), logger) from e
+        print(f"docker build --network=host -t {image_name} -f {build_dir}")
     finally:
         close_logger(logger)  # functions that create loggers should close them
 
@@ -178,18 +142,6 @@ def build_base_images(
 
     # Build the base images
     for image_name, (dockerfile, platform) in base_images.items():
-        try:
-            # Check if the base image already exists
-            client.images.get(image_name)
-            if force_rebuild:
-                # Remove the base image if it exists and force rebuild is enabled
-                remove_image(client, image_name, "quiet")
-            else:
-                print(f"Base image {image_name} already exists, skipping build.")
-                continue
-        except docker.errors.ImageNotFound:
-            pass
-        # Build the base image (if it does not exist or force rebuild is enabled)
         print(f"Building base image ({image_name})")
         build_image(
             image_name=image_name,
@@ -217,43 +169,14 @@ def get_env_configs_to_build(
     image_scripts = dict()
     base_images = dict()
     test_specs = get_test_specs_from_dataset(dataset)
-
     for test_spec in test_specs:
-        # Check if the base image exists
-        try:
-            if test_spec.base_image_key not in base_images:
-                base_images[test_spec.base_image_key] = client.images.get(
-                    test_spec.base_image_key
-                )
-            base_image = base_images[test_spec.base_image_key]
-        except docker.errors.ImageNotFound:
-            raise Exception(
-                f"Base image {test_spec.base_image_key} not found for {test_spec.env_image_key}\n."
-                "Please build the base images first."
-            )
+        # Add the environment image to the list of images to build
+        image_scripts[test_spec.env_image_key] = {
+            "setup_script": test_spec.setup_env_script,
+            "dockerfile": test_spec.env_dockerfile,
+            "platform": test_spec.platform,
+        }
 
-        # Check if the environment image exists
-        image_exists = False
-        try:
-            env_image = client.images.get(test_spec.env_image_key)
-            image_exists = True
-
-            if env_image.attrs["Created"] < base_image.attrs["Created"]:
-                # Remove the environment image if it was built after the base_image
-                for dep in find_dependent_images(env_image):
-                    # Remove instance images that depend on this environment image
-                    remove_image(client, dep.image_id, "quiet")
-                remove_image(client, test_spec.env_image_key, "quiet")
-                image_exists = False
-        except docker.errors.ImageNotFound:
-            pass
-        if not image_exists:
-            # Add the environment image to the list of images to build
-            image_scripts[test_spec.env_image_key] = {
-                "setup_script": test_spec.setup_env_script,
-                "dockerfile": test_spec.env_dockerfile,
-                "platform": test_spec.platform,
-            }
     return image_scripts
 
 
@@ -340,7 +263,7 @@ def build_instance_images(
     ):
     """
     Builds the instance images required for the dataset if they do not already exist.
-    
+
     Args:
         dataset (list): List of test specs or dataset to build images for
         client (docker.DockerClient): Docker client to use for building the images
@@ -434,48 +357,22 @@ def build_instance_image(
     env_image_name = test_spec.env_image_key
     dockerfile = test_spec.instance_dockerfile
 
-    # Check that the env. image the instance image is based on exists
-    try:
-        env_image = client.images.get(env_image_name)
-    except docker.errors.ImageNotFound as e:
-        raise BuildImageError(
-            test_spec.instance_id,
-            f"Environment image {env_image_name} not found for {test_spec.instance_id}",
-            logger,
-        ) from e
     logger.info(
         f"Environment image {env_image_name} found for {test_spec.instance_id}\n"
         f"Building instance image {image_name} for {test_spec.instance_id}"
     )
 
-    # Check if the instance image already exists
-    image_exists = False
-    try:
-        instance_image = client.images.get(image_name)
-        if instance_image.attrs["Created"] < env_image.attrs["Created"]:
-            # the environment image is newer than the instance image, meaning the instance image may be outdated
-            remove_image(client, image_name, "quiet")
-            image_exists = False
-        else:
-            image_exists = True
-    except docker.errors.ImageNotFound:
-        pass
-
-    # Build the instance image
-    if not image_exists:
-        build_image(
-            image_name=image_name,
-            setup_scripts={
-                "setup_repo.sh": test_spec.install_repo_script,
-            },
-            dockerfile=dockerfile,
-            platform=test_spec.platform,
-            client=client,
-            build_dir=build_dir,
-            nocache=nocache,
-        )
-    else:
-        logger.info(f"Image {image_name} already exists, skipping build.")
+    build_image(
+        image_name=image_name,
+        setup_scripts={
+            "setup_repo.sh": test_spec.install_repo_script,
+        },
+        dockerfile=dockerfile,
+        platform=test_spec.platform,
+        client=client,
+        build_dir=build_dir,
+        nocache=nocache,
+    )
 
     if new_logger:
         close_logger(logger)
